@@ -27,6 +27,7 @@
 
 #define UNCHECKED_BITSTREAM_READER 1
 
+#include "libavutil/avassert.h"
 #include "libavutil/cpu.h"
 #include "internal.h"
 #include "avcodec.h"
@@ -129,6 +130,39 @@ av_cold int ff_h263_decode_end(AVCodecContext *avctx)
 }
 
 /**
+ * Find slice end for the stream .
+ * @param p pointer to buffer to scan
+ * @param end pointer to the end of the buffer
+ * @return pointer to the end of the slice, or "end" if none was found
+ */
+static const uint8_t *h263_find_slice_end(MpegEncContext *s, const uint8_t *restrict p, const uint8_t *restrict end)
+{
+    av_assert2(p < end);
+
+    end-=2;
+    p++;
+    if(s->resync_marker){
+        int prefix_len = ff_mpeg4_get_video_packet_prefix_length(s);
+        for(;p<end; p+=2){
+            if(!*p){
+                if      (!p[-1] && (((p[1] >> (23-prefix_len)) == 1) || (p[1] == 1))) return p - 1;
+                else if (!p[ 1] && (((p[2] >> (23-prefix_len)) == 1) || (p[2] == 1))) return p;
+            }
+        }
+    }
+    else
+    {
+        for(;p<end; p+=2){
+            if(!*p){
+                if      (!p[-1] && (p[1] == 1)) return p - 1;
+                else if (!p[ 1] && (p[2] == 1)) return p;
+            }
+        }
+    }
+    return end+2;
+}
+
+/**
  * Return the number of bytes consumed for building the current frame.
  */
 static int get_consumed_bytes(MpegEncContext *s, int buf_size){
@@ -162,9 +196,19 @@ static int decode_slice(MpegEncContext *s){
 
     if (s->avctx->hwaccel) {
         const uint8_t *start= s->gb.buffer + get_bits_count(&s->gb)/8;
-        const uint8_t *end  = ff_h263_find_resync_marker(start + 1, s->gb.buffer_end);
+        const uint8_t *end  = h263_find_slice_end(s, start + 1, s->gb.buffer_end);
+        int ret = 0;
+
         skip_bits_long(&s->gb, 8*(end - start));
-        return s->avctx->hwaccel->decode_slice(s->avctx, start, end - start);
+        ret = s->avctx->hwaccel->decode_slice(s->avctx, start, end - start);
+
+        /* Next start code detected */
+        if (end <= s->gb.buffer_end-2){
+            if (!end[0] && !end[1] && (end[2] == 1)){
+                s->mb_y = s->mb_height;
+            }
+        }
+        return ret;
     }
 
     if(s->partitioned_frame){
@@ -689,7 +733,7 @@ retry:
 frame_end:
     /* divx 5.01+ bistream reorder stuff */
     if(s->codec_id==CODEC_ID_MPEG4 && s->divx_packed){
-        int current_pos= s->gb.buffer == s->bitstream_buffer ? 0 : (get_bits_count(&s->gb)>>3);
+        int current_pos= /* s->gb.buffer == s->bitstream_buffer ? 0 : */ (get_bits_count(&s->gb)>>3);
         int startcode_found=0;
 
         if(buf_size - current_pos > 7){

@@ -55,6 +55,10 @@ public:
 
   virtual bool makeOMXCurrent();
 
+  // Local to WinSystemX11 only
+  Display*   GetDisplay() const { return m_dpy; }
+  Window     GetWindow() const { return m_eglWindow; }
+
   EGLContext GetEGLContext() const;
   EGLDisplay GetEGLDisplay() const;
 protected:
